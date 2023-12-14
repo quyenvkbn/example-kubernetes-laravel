@@ -1,0 +1,127 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc-claim
+spec:
+  resources:
+    requests:
+      storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+---
+apiVersion: apps/v1 # for versions before 1.9.0 use apps/v1beta2
+kind: Deployment
+metadata:
+  name: laravel-deployment
+  labels:
+    app: laravel
+spec:
+  selector:
+    matchLabels:
+      app: laravel
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: laravel
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0 # mysql container for keeping php data 
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: password
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: dbName
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: dbUserNameKey
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: dbPasswordKey
+          ports:
+            - containerPort: 3306
+              name: mysql
+          volumeMounts: # volume for mysql data
+            - name: mysql-persistent-storage
+              mountPath: /var/lib/mysql
+        - name: nginx   # nginx web server for php app
+          image: nginx:latest
+          ports:
+            - containerPort: 80
+          volumeMounts: 
+            - name: shared-files    
+              mountPath: /var/www/html/laravel-app/
+            - name: nginx-config-volume # mount volume for nginx config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+        - name: laravel   # php container with installed laravel app
+          image: quyenvk/laravel-api
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: 100m
+              memory: 100Mi
+          env:    # get environment variables from secrets
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: dbName
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: dbUserNameKey
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: dbPasswordKey
+          ports:
+            - containerPort: 9000
+              name: laravel-9000
+            - containerPort: 8000
+              name: laravel-8000
+          lifecycle:  
+            postStart:  # commands that will be executed after container was created
+              exec:
+                command:  #generate key, 
+                  - "sh" 
+                  - "-c"
+                  - >
+                    mv /var/www/laravel-app/.env.example /var/www/laravel-app/.env;
+                    composer install;
+                    php artisan key:generate;
+                    sed -i
+                    "s/DB_DATABASE=laravel/DB_DATABASE=$MYSQL_DATABASE/g" /var/www/laravel-app/.env;
+                    sed -i
+                    "s/DB_USERNAME=quyenvkbn/DB_USERNAME=$MYSQL_USER/g" /var/www/laravel-app/.env;
+                    sed -i
+                    "s/DB_PASSWORD=quyenvkbn/DB_PASSWORD=$MYSQL_PASSWORD/g" /var/www/laravel-app/.env;
+                    sed -i
+                    "s/DB_HOST=127.0.0.1/DB_HOST=laravel/g" /var/www/laravel-app/.env;
+                    cp -R /var/www/laravel-app/ /var/www/html/;
+                    chown -R www-data:www-data /var/www/html
+          volumeMounts: 
+            - name: shared-files
+              mountPath: /var/www/html/laravel-app/
+      volumes:
+        - name: mysql-persistent-storage  # mysql storage
+          persistentVolumeClaim:
+            claimName: mysql-pvc-claim
+        - name: shared-files              
+          emptyDir: {}
+        - name: nginx-config-volume       
+          configMap:
+            name: nginx-config
